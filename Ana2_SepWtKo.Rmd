@@ -1,0 +1,186 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(biomaRt)
+library(sctransform)
+library(gridExtra)
+```
+
+```{r}
+mat <- readMM(file = "matrix.mtx")
+feature.names = read.delim("genes.tsv",
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names = read.delim("barcodes.tsv",
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+colnames(mat) = seq(1,80000)
+rownames(mat) = feature.names$V1
+
+MouseSampleTagList <- sapply(1:12, (function(x)paste0("MouseSampleTag", formatC(x,width = 2, format = "d", flag = "0"))))
+MouseSampleTagData <- mat[feature.names$V1 %in% MouseSampleTagList,]
+SeqData <- mat[!feature.names$V1 %in% MouseSampleTagList,]
+
+SeqData <- CreateSeuratObject(counts = SeqData, min.cells = 3)
+
+
+# Add MouseSampleTag data as a new assay independent from RNA
+SeqData[["MouseSampleTag"]] <- CreateAssayObject(counts = MouseSampleTagData)
+
+# Normalize MouseSampleTag data, here we use centered log-ratio (CLR) transformation
+SeqData <- NormalizeData(SeqData, assay = "MouseSampleTag", normalization.method = "CLR")
+
+
+
+# Identify thresholds for filtering
+SeqData[["percent.mt"]] <- PercentageFeatureSet(SeqData, pattern = "^mt-")
+#VlnPlot(SeqData, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+#plot1 <- FeatureScatter(SeqData, feature1 = "nCount_RNA", feature2 = "percent.mt")
+#plot2 <- FeatureScatter(SeqData, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+#plot3 <- FeatureScatter(SeqData, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+#plot1 + plot2 + plot3
+
+# Filtering
+# SeqData <- subset(SeqData, subset =  nFeature_RNA > 500 & percent.mt < 10 & nFeature_RNA < 4000)
+SeqData <- subset(SeqData, subset = nFeature_RNA > 1600 & nCount_RNA < 60000 & percent.mt < 10)
+
+
+# Demultiplexing based on mouse sample tags
+SeqData <- HTODemux(SeqData, assay = "MouseSampleTag", positive.quantile = 0.99)
+
+table(SeqData$MouseSampleTag_classification.global)
+
+
+rm(mat, barcode.names, feature.names, MouseSampleTagData)
+```
+
+
+```{r}
+# Remove doubletts
+Idents(SeqData) <- "MouseSampleTag_classification.global"
+SeqData <- subset(SeqData, idents = "Singlet")
+
+
+
+# Annotating datasets
+Idents(SeqData) <- "MouseSampleTag_classification"
+
+Maf_Seurat_WT <- subset(SeqData, idents = c("MouseSampleTag01", "MouseSampleTag08", "MouseSampleTag11"))
+Maf_Seurat_KO <- subset(SeqData, idents = c("MouseSampleTag04", "MouseSampleTag06", "MouseSampleTag12"))
+
+Tgfb_Seurat_WT <- subset(SeqData, idents = c("MouseSampleTag02", "MouseSampleTag05", "MouseSampleTag09"))
+Tgfb_Seurat_KO <- subset(SeqData, idents = c("MouseSampleTag03", "MouseSampleTag07", "MouseSampleTag10"))
+
+
+rm(SeqData)
+
+# Normalization
+Maf_Seurat_WT <- SCTransform(Maf_Seurat_WT, vars.to.regress = "percent.mt")
+Maf_Seurat_KO <- SCTransform(Maf_Seurat_KO, vars.to.regress = "percent.mt")
+Tgfb_Seurat_WT <- SCTransform(Tgfb_Seurat_WT, vars.to.regress = "percent.mt")
+Tgfb_Seurat_KO <- SCTransform(Tgfb_Seurat_KO, vars.to.regress = "percent.mt")
+```
+
+
+
+```{r}
+# Generate UMAP for wildtype Maf dataset
+
+Maf_Seurat_WT <- RunPCA(Maf_Seurat_WT)
+Maf_Seurat_WT <- RunUMAP(Maf_Seurat_WT, dims = 1:10, return.model = TRUE)
+
+
+
+Maf_Seurat_WT <- FindNeighbors(Maf_Seurat_WT, dims = 1:10)
+Maf_Seurat_WT <- FindClusters(Maf_Seurat_WT, resolution = 0.3)
+Maf_Seurat_WT <- FindClusters(Maf_Seurat_WT)
+
+
+DimPlot(Maf_Seurat_WT, reduction = "umap")
+
+
+```
+
+
+```{r}
+
+# custom selection of genes of interest
+FeaturePlot(Maf_Seurat_WT, features = c("Cd4", "Cxcr5", "Il17a", "Il17f", "Bcl6", "Rorc", "Maf", "Sell", "Il7r", "Ccr7", "Cd44", "Ccr6", "Tbx21", "Cxcr3", "Gata3", "Foxp3"))
+
+
+```
+
+
+```{r}
+# Project the knockout dataset onto the wldtype dataset
+
+anchors <- FindTransferAnchors(reference = Maf_Seurat_WT, query = Maf_Seurat_KO)
+
+Maf_Seurat_KO <- MapQuery(anchorset = anchors, reference = Maf_Seurat_WT, query = Maf_Seurat_KO, reference.reduction = "pca", reduction.model = "umap")
+
+
+Maf_Seurat_KO <- IntegrateEmbeddings(anchorset = anchors, reference = Maf_Seurat_WT,
+    query = Maf_Seurat_KO, new.reduction.name = "ref.pca")
+
+Maf_Seurat_KO <- ProjectUMAP(query = Maf_Seurat_KO, query.reduction = "ref.pca", reference = Maf_Seurat_WT,
+    reference.reduction = "pca", reduction.model = "umap")
+
+
+
+Maf_Seurat_KO <- RunPCA(Maf_Seurat_KO)
+Maf_Seurat_KO <- FindNeighbors(Maf_Seurat_KO, dims = 1:10)
+Maf_Seurat_KO <- FindClusters(Maf_Seurat_KO)
+
+# Separate plotting
+test_KO <- DimPlot(Maf_Seurat_KO, reduction = "ref.umap", combine = FALSE)
+test_WT <- DimPlot(Maf_Seurat_WT, reduction = "umap", combine = FALSE)
+
+grid.arrange(test_KO, test_WT, ncol=2)
+
+# Combined plotting
+test_KO_df <- test_KO$data %>% mutate(UMAP_1 = refUMAP_1, UMAP_2 = refUMAP_2, Geno = "KO") %>% dplyr::select(-c(refUMAP_1,refUMAP_2))
+test_WT_df <- test_WT$data %>% mutate(Geno = "WT")
+test <- bind_rows(test_KO_df, test_WT_df)
+
+ggplot(test, aes(UMAP_1,UMAP_2, col = Geno)) + geom_point(size = 1)
+
+```
+
+
+```{r}
+# Plotting Tfh and Th17 features on the wildtype datasets
+convertHumanGeneList <- function(x){
+  return(unname(sapply(x, (function(y) paste0(substr(y, 1,1), tolower(substring(y,2)))))))
+}
+
+TfhVTh17_UP <- read.delim("genesets/GSE11924_TFH_VS_TH17_CD4_TCELL_UP.txt") %>% tail(-1) %>% .[[1]] %>%
+  convertHumanGeneList() %>% list()
+TfhVTh17_DN <- read.delim("genesets/GSE11924_TFH_VS_TH17_CD4_TCELL_DN.txt") %>% tail(-1) %>% .[[1]] %>%
+  convertHumanGeneList() %>% list()
+
+Maf_Seurat_WT <- AddModuleScore(
+  object = Maf_Seurat_WT,
+  features = TfhVTh17_UP,
+  name = 'TfhVTh17_UP'
+)
+
+Maf_Seurat_WT <- AddModuleScore(
+  object = Maf_Seurat_WT,
+  features = TfhVTh17_DN,
+  name = 'TfhVTh17_DN'
+)
+
+
+FeaturePlot(Maf_Seurat_WT, reduction = "umap", features = c("TfhVTh17_UP1", "TfhVTh17_DN1"))
+```
+
